@@ -14,6 +14,7 @@ import base64
 import os
 import pandas_ta as ta
 from scipy.signal import find_peaks
+import mplfinance as mpf
 
 
 # --- Initialize OpenAI Client (Helper Function) ---
@@ -76,6 +77,7 @@ def research_stock_data_llm_chat(stock_symbol, analysis_type="CANSLIM"):
             input=full_input,
             tools=[{"type": "web_search_preview"}],
             temperature=temperature_research,
+            max_tokens=3000,
         )
         # --- Parsing Logic (Assuming structure based on previous findings) ---
         print("--" * 40)
@@ -428,45 +430,53 @@ def calculate_trade_levels(stock_symbol, current_price_ref, hist_data):
 
 # --- Function to Generate OHLC Chart (Accepts hist_df) ---
 def generate_ohlc_chart(stock_symbol, hist_df, filename="stock_chart.png"):
-    """Generates a simple OHLC line chart using matplotlib."""
+    """
+    Generates a candlestick chart with volume using mplfinance.
+    Expects hist_df DataFrame to have columns: 'Open', 'High', 'Low', 'Close', 'Volume'
+    (Case sensitive, ensure these column names exist).
+    """
     st.info(f"📊 Generating chart for {stock_symbol}...")
     try:
-        # --- Charting Logic (using hist_df parameter) ---
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(hist_df.index, hist_df["Close"], label="Close", color="blue", lw=1.5)
-        # Optional MAs using hist_df
-        if len(hist_df) > 50:
-            hist_df["MA50"] = hist_df["Close"].rolling(50).mean()
-            ax.plot(
-                hist_df.index,
-                hist_df["MA50"],
-                label="50MA",
-                color="orange",
-                ls="--",
-                lw=1,
-            )
-        if len(hist_df) > 200:
-            hist_df["MA200"] = hist_df["Close"].rolling(200).mean()
-            ax.plot(
-                hist_df.index,
-                hist_df["MA200"],
-                label="200MA",
-                color="red",
-                ls="--",
-                lw=1,
-            )
-        ax.set_title(f"{stock_symbol} Price Chart (Recent Period)")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Price")
-        ax.legend()
-        ax.grid(True, ls="--", alpha=0.6)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(filename, format="png", bbox_inches="tight")
-        plt.close(fig)
+        # Ensure DataFrame index is DatetimeIndex, required by mplfinance
+        if not isinstance(hist_df.index, pd.DatetimeIndex):
+            hist_df.index = pd.to_datetime(hist_df.index)
+
+        # --- Charting Logic using mplfinance ---
+        mav_tuple = ()  # Initialize empty tuple for moving averages
+        # Check data length before calculating MAs
+        if len(hist_df) >= 50:
+            mav_tuple += (50,)
+        if len(hist_df) >= 200:
+            mav_tuple += (200,)  # Add 200 if data is long enough
+
+        # Create the plot with candlesticks, volume, and MAs
+        mpf.plot(
+            hist_df,
+            type="candle",  # Use candlestick chart type
+            volume=True,  # Show volume subplot below the price chart
+            mav=mav_tuple or None,  # Pass the tuple of MAs to plot (or None if empty)
+            title=f"{stock_symbol} OHLC Chart with Volume",
+            style="yahoo",  # Use a common financial chart style
+            figsize=(12, 7),  # Adjust figure size to accommodate volume
+            # Save the figure directly using mplfinance's savefig argument
+            savefig=dict(fname=filename, format="png", bbox_inches="tight"),
+        )
+        plt.close("all")  # Close any figures mplfinance might leave open
+
         return filename
+
+    except KeyError as e:
+        st.error(
+            f"🚨 Error generating chart: Missing expected column: {e}. "
+            "DataFrame needs 'Open', 'High', 'Low', 'Close', 'Volume'."
+        )
+        return None
     except Exception as e:
         st.error(f"🚨 Error generating chart: {e}")
+        # Consider logging the full traceback here for debugging if needed
+        import traceback
+
+        st.error(traceback.format_exc())
         return None
 
 
@@ -483,15 +493,30 @@ def get_llm_image_chart_analysis(stock_symbol, image_path):
         st.error("Failed to encode chart image for AI analysis.")
         return None
 
+    # William Oneil buy criterial prompt
+    chart_analysis_william_prompt = f"""
+    **Task 1:** Analyze the provided OHLC chart image for the stock "{stock_symbol.upper()}".
+    Analyze the provided stock chart image, focusing on identifying potential buy signals according to William O'Neil's chart pattern methodology. Please identify and describe the following specific criteria if present:
+
+    Base Formation: Look for recognizable consolidation patterns such as 'Cup with Handle', 'Double Bottom', 'Flat Base', or 'Ascending Base' following a prior price advance within the visible timeframe. Describe the pattern type and its duration.
+    Pivot Point: Identify the key resistance level (the 'pivot point') for any recognized base pattern. Specify the approximate price level of this pivot.
+    Breakout: Determine if the stock price has moved decisively above the identified pivot point. Note the approximate date or bar where this breakout occurs.
+    Volume Confirmation: Examine the trading volume on the day(s) of the potential breakout. Is the volume significantly elevated compared to the average volume during the preceding base formation period (e.g., noticeably higher, ideally 40-50%+ above average)? Describe the volume characteristics during the breakout.
+    Price Relative to Highs: Note whether the breakout price level corresponds to a new high for the period shown in the chart, or is close to it.
+
+    Synthesize these observations. Based only on the visual information in this chart, does a confluence of these criteria suggest a potential O'Neil-style buy point? If so, clearly describe the location (date/price) and the supporting evidence (pattern, pivot, volume) if not say No William Buy.
+    """
+
     # Prompt focuses analysis on the image provided
     chart_analysis_prompt = f"""
-    **Task:** Analyze the provided OHLC chart image for the stock "{stock_symbol.upper()}".
+    **Task 2:** Analyze the provided OHLC chart image for the stock "{stock_symbol.upper()}".
     **Analysis Instructions:**
     1. Identify potential **support zones** (price levels where buying pressure might appear).
     2. Identify potential **resistance zones** (price levels where selling pressure might appear).
     3. Describe any notable **chart patterns or trends** visible (e.g., uptrend, channel, consolidation).
     4. Suggest potential **entry or exit areas** based purely on the visual chart analysis. Be specific with approximate price levels if possible from the chart.
-    **Output Format:** Use clear headings or bullet points for Support, Resistance, Patterns/Trends, and Potential Entry/Exit Areas. Be concise.
+    
+    **Output Format:** Use clear headings or bullet points for Support, Resistance, Patterns/Trends, and Potential Entry/Exit Areas. Be concise and use two headers: William Buy and Tech-Guy buy.
     """
 
     try:
@@ -502,7 +527,11 @@ def get_llm_image_chart_analysis(stock_symbol, image_path):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": chart_analysis_prompt},
+                        {
+                            "type": "input_text",
+                            "text": chart_analysis_william_prompt
+                            + chart_analysis_prompt,
+                        },
                         {
                             "type": "input_image",
                             "image_url": f"data:image/png;base64,{base64_image}",
@@ -562,7 +591,7 @@ def get_llm_image_chart_analysis(stock_symbol, image_path):
 # --- Streamlit App UI ---
 st.set_page_config(page_title="CANSLIM Stock Analyzer", layout="wide")
 
-st.title("📈 CANSLIM Stock Analyzer (v11 - Simple Levels + AI Chart Analysis)")
+st.title("📈 CANSLIM Stock Analyzer (vibecoded - Simple Levels + AI Chart Analysis)")
 st.caption(
     "Uses LLM for research/analysis, simple SL/TP calc, shows chart, & gets AI image analysis if 'Buy'."
 )
@@ -724,7 +753,8 @@ if analyze_button and stock_symbol:
                             # Clean up the generated chart file after displaying
                             if chart_filename and os.path.exists(chart_filename):
                                 try:
-                                    os.remove(chart_filename)
+                                    print(f"Removing temp chart file: {chart_filename}")
+                                    # os.remove(chart_filename)
                                 except Exception as e:
                                     st.warning(f"Could not remove temp chart file: {e}")
 
