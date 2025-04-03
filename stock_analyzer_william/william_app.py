@@ -1,20 +1,22 @@
 # canslim_app_v11.py
-import streamlit as st
-import datetime
-import openai
-import re
-import json
-import creds
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import io
 import base64
+import datetime
+import io
+import json
 import os
-import pandas_ta as ta
-from scipy.signal import find_peaks
+import re
+
+import creds
+import matplotlib.pyplot as plt
 import mplfinance as mpf
+import numpy as np
+import openai
+import pandas as pd
+import pandas_ta as ta
+import requests
+import streamlit as st
+import yfinance as yf
+from scipy.signal import find_peaks
 
 
 # --- Initialize OpenAI Client (Helper Function) ---
@@ -588,6 +590,75 @@ def get_llm_image_chart_analysis(stock_symbol, image_path):
         return None
 
 
+# Geolocator
+def get_current_geolocation():
+    """
+    Fetches approximate geolocation data based on the public IP address
+    using the ip-api.com service.
+
+    Returns:
+        dict: A dictionary containing geolocation details (like city, country,
+              region, lat, lon, timezone, ip) if successful, otherwise None.
+        Note: Geolocation based on IP is approximate and might represent
+              the location of the ISP provider, not the precise user location.
+    """
+    api_url = "http://ip-api.com/json/"
+    location_data = None
+
+    try:
+        # Add a timeout to prevent indefinite hangs
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+
+        data = response.json()
+
+        # Check if the API call itself was successful
+        if data.get("status") == "success":
+            location_data = {
+                "ip_address": data.get("query"),
+                "city": data.get("city"),
+                "region": data.get("regionName"),
+                "country": data.get("country"),
+                "latitude": data.get("lat"),
+                "longitude": data.get("lon"),
+                "timezone": data.get("timezone"),
+                "isp": data.get("isp"),
+            }
+            # Optional: Log success in Streamlit if running within it
+            # st.sidebar.info(f"Geolocation determined: {location_data.get('city', 'N/A')}, {location_data.get('country', 'N/A')}")
+            print(f"Geolocation determined: {location_data}")  # Or print to console
+        else:
+            error_message = data.get("message", "Unknown API error")
+            if st._is_running_with_streamlit:  # Check if running in Streamlit
+                st.warning(f"Geolocation API Error: {error_message}")
+            else:
+                print(f"Warning: Geolocation API Error: {error_message}")
+
+    except requests.exceptions.RequestException as e:
+        error_message = f"Network error fetching geolocation: {e}"
+        if st._is_running_with_streamlit:
+            st.error(error_message)
+        else:
+            print(f"Error: {error_message}")
+
+    except json.JSONDecodeError:
+        error_message = "Error decoding geolocation API response."
+        if st._is_running_with_streamlit:
+            st.error(error_message)
+        else:
+            print(f"Error: {error_message}")
+
+    except Exception as e:
+        # Catch any other unexpected errors
+        error_message = f"An unexpected error occurred during geolocation: {e}"
+        if st._is_running_with_streamlit:
+            st.error(error_message)
+        else:
+            print(f"Error: {error_message}")
+
+    return location_data
+
+
 # --- Streamlit App UI ---
 st.set_page_config(page_title="CANSLIM Stock Analyzer", layout="wide")
 
@@ -596,7 +667,7 @@ st.caption(
     "Uses LLM for research/analysis, simple SL/TP calc, shows chart, & gets AI image analysis if 'Buy'."
 )
 st.warning(
-    "Note: Uses LLM API (incl. Image Input) + yfinance. Check costs (Image input can be more expensive). **NOT FINANCIAL ADVICE.** Requires `matplotlib`."
+    "Note: Uses text and vision. Check costs (Chart Analysis can be more expensive). **NOT FINANCIAL ADVICE.**"
 )
 
 # --- Input Section ---
@@ -801,6 +872,7 @@ except Exception:
     current_run_time_aedt = (
         datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " (Local Time)"
     )
+geolocator = get_current_geolocation()
 st.markdown(
-    f"Location Context: Beverly Hills, NSW, Australia. Analysis Approx Time: {current_run_time_aedt}. Uses LLM API + yfinance."
+    f"Location Context: {geolocator['city']} - {geolocator['country']}. Analysis Approx Time: {current_run_time_aedt}. Uses LLM API + yfinance."
 )
