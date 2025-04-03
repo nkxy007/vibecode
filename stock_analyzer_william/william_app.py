@@ -79,7 +79,6 @@ def research_stock_data_llm_chat(stock_symbol, analysis_type="CANSLIM"):
             input=full_input,
             tools=[{"type": "web_search_preview"}],
             temperature=temperature_research,
-            max_tokens=3000,
         )
         # --- Parsing Logic (Assuming structure based on previous findings) ---
         print("--" * 40)
