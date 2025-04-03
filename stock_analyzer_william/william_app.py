@@ -1,84 +1,72 @@
-# canslim_app_v7.py
+# canslim_app_v11.py
 import streamlit as st
 import datetime
 import openai
 import re
 import json
 import creds
-import yfinance as yf # Import yfinance
-import pandas as pd    # Import pandas
-import numpy as np     # Import numpy for calculations
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import io
+import base64
+import os
+import pandas_ta as ta
+from scipy.signal import find_peaks
 
-# --- Initialize OpenAI Client (Best practice: outside functions if possible,
-# but keeping inside due to potential Streamlit secrets scoping)
 
-# --- Function to RESEARCH stock data via LLM (responses.create) ---
-# (Keep the research_stock_data_llm_chat function from v6 exactly as it was)
-def research_stock_data_llm_chat(stock_symbol, analysis_type="CANSLIM"):
-    """
-    Uses the custom client.responses.create(input=...) call and
-    parses the specific JSON output structure provided.
-    Relies on the model's potential Browse capability.
-    """
-    st.info(f"🤖 Asking LLM ({analysis_type}) to research data for {stock_symbol} via Custom Call...")
+# --- Initialize OpenAI Client (Helper Function) ---
+def get_openai_client():
+    """Initializes and returns the OpenAI client."""
     try:
         client = openai.OpenAI(api_key=creds.OPENAI_KEY)
+        return client
     except Exception as e:
-        st.error(f"Error initializing OpenAI client for research: {e}")
+        st.error(f"Error initializing OpenAI client: {e}")
         return None
 
-    current_date_str = datetime.datetime.now().strftime('%Y-%m-%d') # Use current date
 
-    # --- Define the Research Prompt (Make sure 'N' asks for Current Price) ---
-    system_message = f"You are an AI research assistant finding the latest financial data for {stock_symbol.upper()}. Prioritize accuracy and recency. State if data is unavailable."
+# --- Image Encoding Function ---
+def encode_image(image_path):
+    """Encodes an image file to a base64 string."""
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("utf-8")
+    except FileNotFoundError:
+        st.error(f"Error encoding image: File not found at {image_path}")
+        return None
+    except Exception as e:
+        st.error(f"Error encoding image {image_path}: {e}")
+        return None
+
+
+# --- Function to RESEARCH stock data via LLM (responses.create) ---
+def research_stock_data_llm_chat(stock_symbol, analysis_type="CANSLIM"):
+    """Uses client.responses.create(input=...) for research."""
+    st.info(
+        f"🤖 Asking LLM ({analysis_type}) to research data for {stock_symbol} via Custom Call..."
+    )
+    client = get_openai_client()
+    if not client:
+        return None
+    # Using provided time context
+    current_date_str = "April 2, 2025"  # Based on context
+    system_message = f"You are an AI research assistant finding the latest financial data for {stock_symbol.upper()}. Prioritize accuracy and recency up to {current_date_str}. State if data is unavailable."
+    # --- Prompts (CANSLIM/Trend - same as baseline) ---
     if analysis_type == "CANSLIM":
-        user_prompt = f"""
-        **Task:** Research and gather the most recent, publicly available data points for a CANSLIM analysis of the stock "{stock_symbol.upper()}".
-        **Context:** Today is approximately {current_date_str}. Use your Browse capabilities or latest knowledge to find the latest information.
-        **Required Data Points:**
-        * C - Current Quarterly Earnings: Latest reported Quarterly EPS Growth % Year-over-Year (YoY). Target: >25%.
-        * A - Annual Earnings Growth: Estimated or historical 3-5 year annual EPS growth rate. Target: >25%.
-        * N - New Product/Management/Highs: Any significant recent news (products, management changes, major contracts)? Is the stock price near its 52-week high? Provide **Current Price** and 52-week high.
-        * S - Supply and Demand: Recent daily trading volume compared to average volume. Any notes on share structure (float, outstanding shares)? Look for signs of accumulation/distribution.
-        * L - Leader or Laggard: What is the stock's industry? Is it considered a leader in its industry? Provide its Relative Strength (RS) rating or a qualitative description if the exact number isn't found. Target RS > 80-85.
-        * I - Institutional Sponsorship: What is the recent trend in institutional ownership (increasing/decreasing)? Are there notable high-quality institutions holding it?
-        * M - Market Direction: What is the current trend of the overall market (e.g., S&P 500 or Nasdaq)? (e.g., Confirmed Uptrend, Correction, Sideways).
-
-        **Output Format:**
-        Provide the gathered information clearly, labeling each point corresponding to the CANSLIM letter (C, A, N, S, L, I, M). Be factual and state if specific data cannot be found. Do NOT perform the analysis yet, just report the findings. Example:
-        C: Latest Quarterly EPS Growth YoY: +30%
-        A: 3-Year Annual EPS Growth Rate: +28%
-        N: Recent news: Launched new AI chip. Current Price: $150, 52-Week High: $155.
-        S: Volume today is 1.5x average volume. Shares Outstanding: 1B. Signs of accumulation.
-        L: Industry: Semiconductors. Leader. RS Rating: 92.
-        I: Institutional ownership increased by 5% last quarter. Major holders include Fund X, Fund Y.
-        M: Market Trend (S&P 500): Confirmed Uptrend.
-        """
+        user_prompt = f"""**Task:** Research CANSLIM data for "{stock_symbol.upper()}". **Context:** Today is ~{current_date_str}. **Required:** C(Q EPS% YoY), A(Ann EPS% 3-5yr), N(News? **Current Price**? 52wk High?), S(Vol vs Avg? Accum/Dist? Structure?), L(Industry Leader? RS Rating/Desc?), I(Inst. Own Trend? Quality?), M(Market Trend S&P/Nasdaq?). **Format:** Label points C, A, N... Factual. State if missing. Ex: N: News. Current Price: $150, 52-Week High: $155."""  # Concise
         model_to_use = "gpt-4o"
         temperature_research = 0.3
     elif analysis_type == "Trend":
-        user_prompt = f"""
-        **Task:** Research the most recent price and trend data for the stock "{stock_symbol.upper()}" and the general market (S&P 500).
-        **Context:** Today is approximately {current_date_str}. Use your Browse capabilities or latest knowledge to find the latest information.
-        **Required Data Points:**
-        * Latest known stock price for {stock_symbol.upper()}.
-        * General price trend for {stock_symbol.upper()} over the past 1 month (approx).
-        * General price trend for {stock_symbol.upper()} over the past 3 months (approx).
-        * General price trend for the S&P 500 index over the past 1 month (approx).
-        * General price trend for the S&P 500 index over the past 3 months (approx).
-
-        **Output Format:**
-        Provide the gathered information clearly and concisely. Do NOT add analysis, just report the data/trend observation. Example:
-        Stock Price ({stock_symbol.upper()}): $XXX.XX
-        Stock Trend (1M): Uptrend
-        Stock Trend (3M): Sideways
-        Market Trend (1M - S&P 500): Uptrend
-        Market Trend (3M - S&P 500): Uptrend
-        """
+        user_prompt = f"""**Task:** Research price/trend for "{stock_symbol.upper()}" & S&P 500. **Context:** Today ~{current_date_str}. **Required:** Latest Stock Price? 1M Stock Trend? 3M Stock Trend? 1M Market Trend? 3M Market Trend? **Format:** Line-by-line. Ex: Stock Price ({stock_symbol.upper()}): $XXX.XX"""  # Concise
         model_to_use = "gpt-4o"
         temperature_research = 0.2
+        print("--" * 40)
+        print(user_prompt)
+        print(f"searching for {analysis_type} data")
     else:
-        st.error(f"Invalid analysis type for research: {analysis_type}")
+        st.error(f"Invalid research type: {analysis_type}")
         return None
 
     full_input = f"{system_message}\n\n{user_prompt}"
@@ -87,382 +75,702 @@ def research_stock_data_llm_chat(stock_symbol, analysis_type="CANSLIM"):
             model=model_to_use,
             input=full_input,
             tools=[{"type": "web_search_preview"}],
-            temperature=temperature_research
+            temperature=temperature_research,
         )
-        # --- Parsing Logic for the specific responses.create output ---
+        # --- Parsing Logic (Assuming structure based on previous findings) ---
+        print("--" * 40)
+        print(f"Response from AI: {response}")
+        print("--" * 40)
         researched_content = None
-        # ... (Keep the parsing logic from v6 here) ...
         try:
-            if response and hasattr(response, 'output') and isinstance(response.output, list) and len(response.output) > 0:
-                # Assuming the relevant text is often in the second output item based on previous debugging/structure
-                target_output_index = 1 if len(response.output) > 1 else 0
-                output_item = response.output[target_output_index]
-
-                if hasattr(output_item, 'content') and isinstance(output_item.content, list) and len(output_item.content) > 0:
-                    for content_item in output_item.content:
-                        if hasattr(content_item, 'type') and content_item.type == 'output_text':
-                            if hasattr(content_item, 'text'):
-                                researched_content = content_item.text.strip()
-                                break # Found the text
-
+            if (
+                response
+                and hasattr(response, "output")
+                and isinstance(response.output, list)
+                and len(response.output) > 0
+            ):
+                target_idx = 1 if len(response.output) > 1 else 0
+                output_item = response.output[target_idx]
+                if (
+                    hasattr(output_item, "content")
+                    and isinstance(output_item.content, list)
+                    and output_item.content
+                ):
+                    for item in output_item.content:
+                        if (
+                            hasattr(item, "type")
+                            and item.type == "output_text"
+                            and hasattr(item, "text")
+                        ):
+                            researched_content = item.text.strip()
+                            break
             if researched_content is None:
-                 st.warning(f"Could not find 'output_text' in the expected structure for {stock_symbol} ({analysis_type}). Response might be structured differently.")
-
-        except AttributeError as ae:
-            st.error(f"AttributeError while parsing response: {ae}. Unexpected response structure.")
-            researched_content = None
+                st.warning(
+                    f"Could not parse 'output_text' for {stock_symbol} ({analysis_type})."
+                )
         except Exception as e:
-            st.error(f"Error during response parsing: {e}")
+            st.error(f"Parse error: {e}")
             researched_content = None
-
-        # --- End of Parsing Logic ---
-
+        # --- End Parsing ---
         if researched_content:
-            st.success(f"✅ LLM Research successful for {stock_symbol} ({analysis_type}).")
+            st.success(f"✅ LLM Research successful ({analysis_type}).")
             return researched_content
         else:
-            st.error(f"🚨 LLM Research ({analysis_type}) failed to extract content for {stock_symbol}.")
-            try:
-                st.json(json.dumps(response.dict() if hasattr(response, 'dict') else str(response), indent=2))
-            except Exception as dump_error:
-                st.text(f"Could not dump response object: {response}, Error: {dump_error}")
+            st.error(f"🚨 LLM Research failed ({analysis_type}).")
+            return None
+    except openai.APIError as e:
+        st.error(f"🚨 API Error (Research {analysis_type}): {e}")
+        return None
+    except Exception as e:
+        st.error(f"🚨 Error (Research {analysis_type}): {e}")
+        return None
+
+
+# --- Function to FORMAT researched data via LLM (chat.completions) ---
+def format_researched_data_llm_chat(
+    stock_symbol, researched_data, analysis_type="CANSLIM"
+):
+    """Uses client.chat.completions.create to format/analyze..."""
+    st.info(
+        f"🤖 Asking LLM ({analysis_type}) to format researched data via Chat Completion..."
+    )
+    client = get_openai_client()
+    if not client:
+        return None if analysis_type == "Trend" else (None, None)
+    # --- Prompts and Logic (CANSLIM/Trend - same as baseline) ---
+    if analysis_type == "CANSLIM":
+        prompt = f"""**Task:** Analyze provided data for "{stock_symbol.upper()}" using CANSLIM methodology and format output. **Data:** ``` {researched_data} ``` **Instructions:** 1. Analyze each letter (C,A,N...). 2. Comment vs criteria. 3. State if missing. 4. Present point-by-point. 5. Conclude: **Recommendation: [Buy/Sell/Hold/Uncertain]** (separate line, based only on CANSLIM)."""  # Concise
+        model = "gpt-4o"
+        max_tok = 1000
+        temp = 0.5
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You analyze pre-researched data via CANSLIM.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temp,
+                max_tokens=max_tok,
+            )
+            content = (
+                response.choices[0].message.content.strip()
+                if response.choices
+                else None
+            )
+            if not content:
+                st.error(f"🚨 LLM Format (CANSLIM) failed.")
+                return None, None
+            st.success(f"✅ LLM Formatting complete (CANSLIM).")
+            rec = "Uncertain"
+            match = re.search(
+                r"\*\*Recommendation:\s*(Buy|Sell|Hold|Uncertain)\*\*$",
+                content,
+                re.I | re.M,
+            )
+            if match:
+                rec = match.group(1).capitalize()
+            text = f"**CANSLIM Analysis for {stock_symbol.upper()}** (LLM Analyzed: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n{content}\n\n***\n*Disclaimer...*"  # Concise
+            return text, rec
+        except Exception as e:
+            st.error(f"🚨 Error (Format CANSLIM): {e}")
+            return None, None
+    elif analysis_type == "Trend":
+        prompt = f"""**Task:** Format provided data for "{stock_symbol.upper()}". **Data:** ``` {researched_data} ``` **Format:** Recent Price ({stock_symbol.upper()}): [Price]\nStock Trend (1M): [Trend]\nStock Trend (3M): [Trend]\nMarket Trend (1M - S&P 500): [Trend]\nMarket Trend (3M - S&P 500): [Trend]"""  # Concise
+        model = "gpt-4o"
+        max_tok = 200
+        temp = 0.1
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You format trend data."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temp,
+                max_tokens=max_tok,
+            )
+            content = (
+                response.choices[0].message.content.strip()
+                if response.choices
+                else None
+            )
+            if not content:
+                st.error(f"🚨 LLM Format (Trend) failed.")
+                return None
+            st.success(f"✅ LLM Formatting complete (Trend).")
+            text = content + "\n\n*Note: Verify trend data.*"
+            return text
+        except Exception as e:
+            st.error(f"🚨 Error (Format Trend): {e}")
+            return None
+    else:
+        st.error(f"Invalid format type: {analysis_type}")
+        return None if analysis_type == "Trend" else (None, None)
+
+
+# --- Function to Calculate Trade Levels (Accepts hist_data) ---
+def calculate_trade_levels(stock_symbol, current_price_ref, hist_data):
+    """
+    Calculates a comprehensive set of potential trade levels including:
+    - Standard Daily Pivot Points (based on previous day HLC)
+    - Key Moving Averages (50MA, 200MA)
+    - Recent Swing Highs/Lows (based on 6-month lookback using find_peaks)
+    - 14-Day Average True Range (ATR)
+    - ATR-based Stop Loss suggestion below nearest swing low.
+    - Entry/Take Profit suggestions based on swing levels.
+
+    Args:
+        stock_symbol (str): The stock ticker symbol.
+        hist_data (pd.DataFrame): DataFrame containing historical stock data with
+                                  columns 'High', 'Low', 'Close'. Ideally >= 1 year
+                                  to ensure 200MA and swing calculations are robust.
+
+    Returns:
+        dict: A dictionary containing all calculated levels and suggestions,
+              or None if calculation fails due to insufficient data or missing libraries.
+
+    Requires: pandas_ta, scipy
+    """
+    st.info(f"⚙️ Calculating comprehensive trade levels for {stock_symbol}...")
+    calculated_levels = {}
+
+    # --- Dependency Check ---
+    try:
+        import pandas_ta as ta
+        from scipy.signal import find_peaks
+    except ImportError:
+        st.error(
+            "🚨 Libraries Missing: Please install `pandas_ta` and `scipy` to use comprehensive level calculations."
+        )
+        st.code("pip install pandas_ta scipy")
+        return None
+
+    # --- Data Validation ---
+    required_cols = ["High", "Low", "Close"]
+    if hist_data is None or hist_data.empty:
+        st.warning(f"Historical data for {stock_symbol} is empty.")
+        return None
+    if not all(col in hist_data.columns for col in required_cols):
+        st.warning(
+            f"Historical data missing required columns (High, Low, Close) for {stock_symbol}."
+        )
+        return None
+
+    # Use latest close as reference
+    current_close = hist_data["Close"].iloc[-1]
+    calculated_levels["Current Close"] = f"${current_close:.2f}"
+
+    # --- 1. Pivot Point Calculation ---
+    if len(hist_data) >= 2:
+        try:
+            prev_high = hist_data["High"].iloc[-2]
+            prev_low = hist_data["Low"].iloc[-2]
+            prev_close = hist_data["Close"].iloc[-2]
+
+            pivot_point = (prev_high + prev_low + prev_close) / 3
+            r1 = (2 * pivot_point) - prev_low
+            s1 = (2 * pivot_point) - prev_high
+            r2 = pivot_point + (prev_high - prev_low)
+            s2 = pivot_point - (prev_high - prev_low)
+            r3 = prev_high + 2 * (pivot_point - prev_low)
+            s3 = prev_low - 2 * (prev_high - pivot_point)
+
+            calculated_levels.update(
+                {
+                    "Pivot Point (P)": f"${pivot_point:.2f}",
+                    "Pivot R1": f"${r1:.2f}",
+                    "Pivot S1": f"${s1:.2f}",
+                    "Pivot R2": f"${r2:.2f}",
+                    "Pivot S2": f"${s2:.2f}",
+                    "Pivot R3": f"${r3:.2f}",
+                    "Pivot S3": f"${s3:.2f}",
+                }
+            )
+            st.success("✅ Pivots calculated.")
+        except IndexError:
+            st.warning("Could not calculate Pivots (needs >= 2 days history).")
+        except Exception as e:
+            st.warning(f"Pivot calculation error: {e}")
+    else:
+        st.warning("Skipping Pivots (needs >= 2 days history).")
+
+    # --- 2. Moving Average Calculation ---
+    if len(hist_data) >= 50:
+        ma50 = hist_data["Close"].rolling(window=50).mean().iloc[-1]
+        calculated_levels["MA 50-Day"] = f"${ma50:.2f}"
+    else:
+        calculated_levels["MA 50-Day"] = "N/A (<50 days)"
+
+    if len(hist_data) >= 200:
+        ma200 = hist_data["Close"].rolling(window=200).mean().iloc[-1]
+        calculated_levels["MA 200-Day"] = f"${ma200:.2f}"
+    else:
+        calculated_levels["MA 200-Day"] = "N/A (<200 days)"
+    st.success("✅ MAs calculated.")
+
+    # --- 3. Swing High/Low & ATR Calculation ---
+    if len(hist_data) >= 60:  # Need sufficient data for ATR and swings
+        try:
+            # Calculate ATR
+            hist_data.ta.atr(length=14, append=True)  # Adds 'ATRr_14' column
+            latest_atr = (
+                hist_data["ATRr_14"].dropna().iloc[-1]
+                if not hist_data["ATRr_14"].dropna().empty
+                else (current_close * 0.01)
+            )  # Fallback ATR
+            calculated_levels["ATR (14-Day)"] = f"${latest_atr:.2f}"
+
+            # Calculate Swing Highs/Lows (using ~6 months data)
+            hist_6m = hist_data.tail(126)  # Approx 6 months of trading days
+            distance_param = 5  # Min separation between peaks
+            prominence_factor = 0.2  # Sensitivity factor for peak detection
+            # Calculate prominence based on std dev of the 6m window - prevents small insignificant wiggles being peaks
+            prominence_high = hist_6m["High"].std() * prominence_factor
+            prominence_low = hist_6m["Low"].std() * prominence_factor
+
+            # Find peaks (positive for highs, negative for lows)
+            swing_high_indices, _ = find_peaks(
+                hist_6m["High"],
+                distance=distance_param,
+                prominence=prominence_high if prominence_high > 0 else None,
+            )
+            swing_low_indices, _ = find_peaks(
+                -hist_6m["Low"],
+                distance=distance_param,
+                prominence=prominence_low if prominence_low > 0 else None,
+            )  # Note the negative series
+
+            swing_highs = (
+                hist_6m["High"].iloc[swing_high_indices].sort_values(ascending=False)
+            )
+            swing_lows = (
+                hist_6m["Low"].iloc[swing_low_indices].sort_values(ascending=True)
+            )
+
+            # Identify nearest levels relative to current price
+            support_levels = swing_lows[swing_lows < current_close]
+            resistance_levels = swing_highs[swing_highs > current_close]
+
+            nearest_support = (
+                support_levels.iloc[-1]
+                if not support_levels.empty
+                else hist_6m["Low"].min()
+            )
+            nearest_resistance = (
+                resistance_levels.iloc[-1]
+                if not resistance_levels.empty
+                else hist_6m["High"].max()
+            )  # Note: resistance levels sorted descending, so [-1] is closest *above*
+
+            next_support = support_levels.iloc[-2] if len(support_levels) > 1 else None
+            next_resistance = (
+                resistance_levels.iloc[-2] if len(resistance_levels) > 1 else None
+            )  # [-2] is next further away above price
+
+            calculated_levels["Swing Low 1 (Nearest)"] = f"${nearest_support:.2f}"
+            calculated_levels["Swing Low 2"] = (
+                f"${next_support:.2f}" if next_support is not None else "N/A"
+            )
+            calculated_levels["Swing High 1 (Nearest)"] = f"${nearest_resistance:.2f}"
+            calculated_levels["Swing High 2"] = (
+                f"${next_resistance:.2f}" if next_resistance is not None else "N/A"
+            )
+
+            # ATR Stop Loss Suggestion
+            sl_price_atr = nearest_support - (
+                1.0 * latest_atr
+            )  # Example: 1x ATR below nearest swing low
+            sl_suggestion_atr = (
+                f"~${sl_price_atr:.2f} (Based on 1*ATR below Nearest Swing Low)"
+            )
+            calculated_levels["ATR Stop Suggestion"] = sl_suggestion_atr
+
+            # Entry/TP Suggestions (from swing logic)
+            entry_suggestion = f"Consider entry near Swing Low 1 (${nearest_support:.2f}) or on a break above Swing High 1 (${nearest_resistance:.2f})."
+            calculated_levels["Swing Entry Suggestion"] = entry_suggestion
+
+            risk_atr = current_close - sl_price_atr
+            if risk_atr > 0.01:  # Avoid division by zero or tiny risk
+                tp_price_rr = current_close + (2 * risk_atr)  # Example 2:1 R:R target
+                tp_suggestion = f"Swing Targets: Near Swing High 1 (${nearest_resistance:.2f}), potentially Swing High 2 (${next_resistance:.2f} if valid). Consider 2:1 R:R target (~${tp_price_rr:.2f}) based on ATR stop."
+            else:
+                tp_suggestion = f"Swing Targets: Near Swing High 1 (${nearest_resistance:.2f}), potentially Swing High 2 (${next_resistance:.2f} if valid). (R:R calc requires valid ATR stop)."
+            calculated_levels["Swing Take Profit Suggestion"] = tp_suggestion
+
+            calculated_levels["6-Month Low"] = (
+                f"${hist_6m['Low'].min():.2f}"  # Keep for context
+            )
+            calculated_levels["6-Month High"] = (
+                f"${hist_6m['High'].max():.2f}"  # Keep for context
+            )
+
+            st.success("✅ Swings/ATR calculated.")
+
+        except Exception as e:
+            st.error(f"🚨 Error calculating Swing/ATR levels: {e}")
+            calculated_levels["ATR (14-Day)"] = "Error"
+            calculated_levels["Swing Levels"] = "Error during calculation"
+    else:
+        st.warning("Skipping Swing/ATR calculations (needs >= 60 days history).")
+
+    # --- Final Check & Return ---
+    if len(calculated_levels) <= 1:  # Only contains current close
+        st.error("🚨 Comprehensive level calculation failed to produce results.")
+        return None
+
+    st.success(f"✅ Comprehensive trade level calculation complete.")
+    return calculated_levels
+
+
+# --- Function to Generate OHLC Chart (Accepts hist_df) ---
+def generate_ohlc_chart(stock_symbol, hist_df, filename="stock_chart.png"):
+    """Generates a simple OHLC line chart using matplotlib."""
+    st.info(f"📊 Generating chart for {stock_symbol}...")
+    try:
+        # --- Charting Logic (using hist_df parameter) ---
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(hist_df.index, hist_df["Close"], label="Close", color="blue", lw=1.5)
+        # Optional MAs using hist_df
+        if len(hist_df) > 50:
+            hist_df["MA50"] = hist_df["Close"].rolling(50).mean()
+            ax.plot(
+                hist_df.index,
+                hist_df["MA50"],
+                label="50MA",
+                color="orange",
+                ls="--",
+                lw=1,
+            )
+        if len(hist_df) > 200:
+            hist_df["MA200"] = hist_df["Close"].rolling(200).mean()
+            ax.plot(
+                hist_df.index,
+                hist_df["MA200"],
+                label="200MA",
+                color="red",
+                ls="--",
+                lw=1,
+            )
+        ax.set_title(f"{stock_symbol} Price Chart (Recent Period)")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price")
+        ax.legend()
+        ax.grid(True, ls="--", alpha=0.6)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(filename, format="png", bbox_inches="tight")
+        plt.close(fig)
+        return filename
+    except Exception as e:
+        st.error(f"🚨 Error generating chart: {e}")
+        return None
+
+
+# --- Function for IMAGE-BASED AI Chart Analysis (using responses.create) ---
+def get_llm_image_chart_analysis(stock_symbol, image_path):
+    """Uses LLM (responses.create) to analyze chart image."""
+    st.info(f"🤖 Asking LLM to analyze chart image for {stock_symbol}...")
+    client = get_openai_client()
+    if not client:
+        return None
+
+    base64_image = encode_image(image_path)
+    if not base64_image:
+        st.error("Failed to encode chart image for AI analysis.")
+        return None
+
+    # Prompt focuses analysis on the image provided
+    chart_analysis_prompt = f"""
+    **Task:** Analyze the provided OHLC chart image for the stock "{stock_symbol.upper()}".
+    **Analysis Instructions:**
+    1. Identify potential **support zones** (price levels where buying pressure might appear).
+    2. Identify potential **resistance zones** (price levels where selling pressure might appear).
+    3. Describe any notable **chart patterns or trends** visible (e.g., uptrend, channel, consolidation).
+    4. Suggest potential **entry or exit areas** based purely on the visual chart analysis. Be specific with approximate price levels if possible from the chart.
+    **Output Format:** Use clear headings or bullet points for Support, Resistance, Patterns/Trends, and Potential Entry/Exit Areas. Be concise.
+    """
+
+    try:
+        # Using the specific client.responses.create structure for image input
+        response = client.responses.create(
+            model="gpt-4o",  # Ensure this model supports image input
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": chart_analysis_prompt},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{base64_image}",
+                        },
+                    ],
+                }
+            ],
+            temperature=0.4,
+        )
+
+        # --- Assume response structure similar to research call ---
+        ai_analysis_content = None
+        try:
+            if (
+                response
+                and hasattr(response, "output")
+                and isinstance(response.output, list)
+                and len(response.output) > 0
+            ):
+                target_idx = 1 if len(response.output) > 1 else 0
+                output_item = response.output[target_idx]
+                if (
+                    hasattr(output_item, "content")
+                    and isinstance(output_item.content, list)
+                    and output_item.content
+                ):
+                    for item in output_item.content:
+                        if (
+                            hasattr(item, "type")
+                            and item.type == "output_text"
+                            and hasattr(item, "text")
+                        ):
+                            ai_analysis_content = item.text.strip()
+                            break
+            if ai_analysis_content is None:
+                st.warning(f"Could not parse LLM image analysis response.")
+        except Exception as e:
+            st.error(f"Parse error (Image Analysis): {e}")
+            ai_analysis_content = None
+        # --- End Parsing ---
+
+        if ai_analysis_content:
+            st.success(f"✅ LLM Chart Image Analysis complete.")
+            return ai_analysis_content
+        else:
+            st.error(f"🚨 LLM Chart Image Analysis failed.")
             return None
 
     except openai.APIError as e:
-        st.error(f"🚨 OpenAI API Error during LLM Research ({analysis_type}) for {stock_symbol}: {e}")
+        st.error(f"🚨 OpenAI API Error (Image Analysis): {e}")
         return None
     except Exception as e:
-        st.error(f"🚨 Unexpected error during LLM Research ({analysis_type}) for {stock_symbol}: {e}")
+        st.error(f"🚨 Unexpected error (Image Analysis): {e}")
         return None
 
-
-# --- Function to FORMAT researched data via LLM Chat Completions ---
-# (Keep the format_researched_data_llm_chat function from v6 exactly as it was)
-def format_researched_data_llm_chat(stock_symbol, researched_data, analysis_type="CANSLIM"):
-    """
-    Uses client.chat.completions.create to format the researched data
-    into the final analysis output.
-    """
-    st.info(f"🤖 Asking LLM ({analysis_type}) to format researched data for {stock_symbol} via Chat Completion...")
-    try:
-        client = openai.OpenAI(api_key=creds.OPENAI_KEY)
-    except Exception as e:
-        st.error(f"Error initializing OpenAI client for formatting: {e}")
-        return None if analysis_type == "Trend" else (None, None)
-
-    # --- Define the Formatting Prompt (same prompts as before) ---
-    if analysis_type == "CANSLIM":
-        prompt = f"""
-        **Task:** Analyze the provided research data for stock "{stock_symbol.upper()}" using William O'Neil's CANSLIM methodology and format the output.
-        **Provided Research Data:**
-        ```
-        {researched_data}
-        ```
-        **Analysis and Formatting Instructions:**
-        1. Go through each letter of CANSLIM (C, A, N, S, L, I, M).
-        2. For each letter, analyze the relevant information from the "Provided Research Data".
-        3. State the finding and briefly comment on whether it meets the typical CANSLIM criteria.
-        4. If data for a specific point was noted as "not found" or is missing, explicitly state that.
-        5. Present the analysis clearly, point-by-point for each letter.
-        6. Conclude with a final recommendation on a **separate, final line**, formatted *exactly* like this:
-           **Recommendation: [Buy/Sell/Hold/Uncertain]**
-           Base the recommendation *only* on the analysis of the provided data according to the CANSLIM rules.
-        """
-        model_to_use = "gpt-4o"
-        max_tokens_format = 1000
-        temperature_format = 0.5
-
-        try:
-            # *** Using client.chat.completions.create for Formatting/Analysis ***
-            response = client.chat.completions.create(
-                model=model_to_use,
-                messages=[
-                    {"role": "system", "content": "You are an AI assistant analyzing pre-researched stock data using CANSLIM and formatting the results."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temperature_format,
-                max_tokens=max_tokens_format
-            )
-            # --- Standard Response Parsing ---
-            formatted_content = None
-            if response.choices:
-                message = response.choices[0].message
-                if hasattr(message, 'content'):
-                    formatted_content = message.content.strip()
-
-            if not formatted_content:
-                st.error(f"🚨 LLM Formatting (CANSLIM) failed for {stock_symbol}.")
-                return None, None
-
-            st.success(f"✅ LLM Formatting complete for {stock_symbol} (CANSLIM).")
-            # --- Parse Recommendation ---
-            recommendation = "Uncertain"
-            match = re.search(r"\*\*Recommendation:\s*(Buy|Sell|Hold|Uncertain)\*\*$", formatted_content, re.IGNORECASE | re.MULTILINE)
-            if match: recommendation = match.group(1).capitalize()
-            # --- Prepare Final Analysis Text ---
-            analysis_text = f"**CANSLIM Analysis for {stock_symbol.upper()}** (Data researched & analyzed by LLM: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n\n"
-            analysis_text += formatted_content
-            analysis_text += "\n\n***\n*Disclaimer: Analysis based on LLM-researched data. Verify all data. Not financial advice.*"
-            return analysis_text, recommendation
-
-        except openai.APIError as e:
-            st.error(f"🚨 OpenAI API Error (Formatting CANSLIM): {e}")
-            return None, None
-        except Exception as e:
-            st.error(f"🚨 Unexpected error (Formatting CANSLIM): {e}")
-            return None, None
-
-    elif analysis_type == "Trend":
-        prompt = f"""
-        **Task:** Format the provided research data for stock "{stock_symbol.upper()}" into the specified line-by-line output.
-        **Provided Research Data:**
-        ```
-        {researched_data}
-        ```
-        **Formatting Instructions:**
-        Extract the required information and present it *exactly* in this format:
-
-        Recent Price ({stock_symbol.upper()}): [Price or "Data unavailable"]
-        Stock Trend (1M): [Trend or "Data unavailable"]
-        Stock Trend (3M): [Trend or "Data unavailable"]
-        Market Trend (1M - S&P 500): [Trend or "Data unavailable"]
-        Market Trend (3M - S&P 500): [Trend or "Data unavailable"]
-        """
-        model_to_use = "gpt-4o"
-        max_tokens_format = 200
-        temperature_format = 0.1
-
-        try:
-            response = client.chat.completions.create(
-                model=model_to_use,
-                messages=[
-                    {"role": "system", "content": "You format pre-researched stock trend data."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temperature_format,
-                max_tokens=max_tokens_format
-            )
-            # --- Standard Response Parsing ---
-            formatted_content = None
-            if response.choices:
-                 message = response.choices[0].message
-                 if hasattr(message, 'content'):
-                      formatted_content = message.content.strip()
-
-            if not formatted_content:
-                st.error(f"🚨 LLM Formatting (Trend) failed for {stock_symbol}.")
-                return None
-
-            st.success(f"✅ LLM Formatting complete for {stock_symbol} (Trend).")
-            trend_analysis_text = formatted_content
-            trend_analysis_text += "\n\n*Note: Price/trend data researched via LLM. Verify.*"
-            return trend_analysis_text
-
-        except openai.APIError as e:
-            st.error(f"🚨 OpenAI API Error (Formatting Trend): {e}")
-            return None
-        except Exception as e:
-            st.error(f"🚨 Unexpected error (Formatting Trend): {e}")
-            return None
-    else:
-        st.error(f"Invalid analysis type for formatting: {analysis_type}")
-        return None if analysis_type == "Trend" else (None, None)
-
-
-# --- NEW Function to Calculate Trade Levels ---
-def calculate_trade_levels(stock_symbol, current_price_ref):
-    """
-    Calculates potential support, resistance, stop-loss, and take-profit levels
-    based on historical data using yfinance and pandas.
-
-    Args:
-        stock_symbol (str): The stock ticker.
-        current_price_ref (float): The current price (from LLM research) for reference.
-
-    Returns:
-        dict: A dictionary containing calculated levels, or None if calculation fails.
-    """
-    st.info(f"⚙️ Calculating potential trade levels for {stock_symbol}...")
-    try:
-        # Fetch 7 months of data to ensure enough for 6 months analysis + rolling periods
-        ticker = yf.Ticker(stock_symbol)
-        hist = ticker.history(period="7mo", interval="1d") # Daily data
-        print("--"*40)
-        print(f"price history: \n {hist}")
-        print("--"*40)
-
-        if hist.empty or len(hist) < 60: # Need at least ~3 months of data for reasonable S/R
-            st.warning(f"Insufficient historical data found for {stock_symbol} (need ~3-6 months). Cannot calculate levels.")
-            return None
-
-        # --- Simple Support/Resistance Calculation ---
-        # Using rolling minima/maxima over different periods within the last ~6 months (approx 126 trading days)
-        hist_6m = hist.tail(126) # Approx 6 months
-
-        # Support Levels (recent lows)
-        low_60d = hist_6m['Low'].tail(60).min() # Min low over last ~3 months
-        low_180d = hist['Low'].tail(180).min() # Min low over last ~6 months (using full 180 days available)
-
-        # Resistance Levels (recent highs)
-        high_60d = hist_6m['High'].tail(60).max() # Max high over last ~3 months
-        high_180d = hist['High'].tail(180).max() # Max high over last ~6 months
-
-        # --- Entry Suggestion ---
-        # Use the LLM's current price as a reference, suggest entry near support if applicable
-        entry_suggestion = f"Current Price Ref: ${current_price_ref:.2f}. Consider entry near Support 1 (${low_60d:.2f}) on pullback, or on confirmation above Resistance 1 (${high_60d:.2f})."
-
-        # --- Stop Loss Calculation ---
-        # Place below a key support level. Let's use the 60-day low.
-        # Add a small buffer (e.g., 1-2% of the support level)
-        stop_loss_price = low_60d * 0.99 # 1% buffer below 60d low
-        stop_loss_suggestion = f"Consider Stop Loss below Support 1, e.g., around ${stop_loss_price:.2f}."
-
-        # --- Take Profit Calculation ---
-        # Option 1: Target Resistance 1
-        tp1_resistance = high_60d
-        # Option 2: Risk/Reward Ratio (e.g., 2:1)
-        risk_per_share = current_price_ref - stop_loss_price
-        if risk_per_share > 0: # Avoid division by zero or negative risk
-            tp2_rr = current_price_ref + (2 * risk_per_share) # 2:1 Reward/Risk
-            take_profit_suggestion = f"Potential Take Profit Levels: Near Resistance 1 (${tp1_resistance:.2f}), or based on 2:1 R/R (~${tp2_rr:.2f})."
-        else:
-            take_profit_suggestion = f"Potential Take Profit Level: Near Resistance 1 (${tp1_resistance:.2f}). (R/R calc skipped due to low risk). "
-
-
-        st.success(f"✅ Trade level calculation complete for {stock_symbol}.")
-
-        return {
-            "Entry Suggestion": entry_suggestion,
-            "Support 1 (60d Low)": f"${low_60d:.2f}",
-            "Support 2 (180d Low)": f"${low_180d:.2f}",
-            "Resistance 1 (60d High)": f"${high_60d:.2f}",
-            "Resistance 2 (180d High)": f"${high_180d:.2f}",
-            "Stop Loss Suggestion": stop_loss_suggestion,
-            "Take Profit Suggestion": take_profit_suggestion
-        }
-
-    except Exception as e:
-        st.error(f"🚨 Error calculating trade levels for {stock_symbol}: {e}")
-        # import traceback; st.error(traceback.format_exc()) # Uncomment for detailed debug
-        return None
 
 # --- Streamlit App UI ---
 st.set_page_config(page_title="CANSLIM Stock Analyzer", layout="wide")
 
-st.title("📈 CANSLIM Stock Analyzer (v7 - Added SL/TP Calculation)")
-st.caption("Uses LLM for research/formatting & Calculates potential SL/TP levels if 'Buy'.")
-st.warning("Note: Uses LLM API (potentially twice per analysis) & yfinance. Check costs. Data/calculations are estimates. **NOT FINANCIAL ADVICE.**")
+st.title("📈 CANSLIM Stock Analyzer (v11 - Simple Levels + AI Chart Analysis)")
+st.caption(
+    "Uses LLM for research/analysis, simple SL/TP calc, shows chart, & gets AI image analysis if 'Buy'."
+)
+st.warning(
+    "Note: Uses LLM API (incl. Image Input) + yfinance. Check costs (Image input can be more expensive). **NOT FINANCIAL ADVICE.** Requires `matplotlib`."
+)
 
 # --- Input Section ---
 st.header("Stock Input")
 stock_symbol = st.text_input("Enter Stock Symbol (e.g., AAPL, NVDA, MSFT):", "").upper()
 
 # --- Analysis Trigger ---
-analyze_button = st.button(f"Analyze {stock_symbol} with LLM" if stock_symbol else "Analyze Stock")
+analyze_button = st.button(
+    f"Analyze {stock_symbol} with LLM" if stock_symbol else "Analyze Stock"
+)
 
 # --- Analysis Output Section ---
 if analyze_button and stock_symbol:
 
-    # Shared variables for results
-    researched_canslim_data = None
-    analysis_result = None
-    recommendation_result = None
-    current_price = None # Variable to store parsed price
+    # Initialize variables
+    researched_canslim_data, analysis_result, recommendation_result, current_price = (
+        None,
+        None,
+        None,
+        None,
+    )
+    (
+        hist_data,
+        simple_trade_levels,
+        chart_filename,
+        researched_trend_data,
+        trend_data_text,
+        ai_chart_analysis_text,
+    ) = (None, None, None, None, None, None)
+    CHART_FILE = f"{stock_symbol}_chart.png"  # Define chart filename
 
-    # --- 1. Research Phase (CANSLIM) ---
-    with st.spinner(f"🤖 Researching CANSLIM data for {stock_symbol}..."):
+    # --- 1. Research CANSLIM ---
+    with st.spinner(f"🤖 Researching CANSLIM data..."):
         researched_canslim_data = research_stock_data_llm_chat(stock_symbol, "CANSLIM")
 
     if researched_canslim_data:
-        # --- Attempt to Parse Current Price from Research Data ---
-        # Look for "Current Price: $XXX.XX" in the N section findings
-        price_pattern = r"Current Price:\s*\$?([\d,]+\.?\d*)"
-        price_match = re.search(price_pattern, researched_canslim_data, re.IGNORECASE)
-        if price_match:
+        # --- Parse Price ---
+        match = re.search(
+            r"Current Price:\s*\$?([\d,]+\.?\d*)", researched_canslim_data, re.I
+        )
+        if match:
             try:
-                current_price = float(price_match.group(1).replace(',', ''))
-                st.info(f"Parsed current price reference: ${current_price:.2f}")
+                current_price = float(match.group(1).replace(",", ""))
+                st.sidebar.info(f"Parsed Price: ${current_price:.2f}")
             except ValueError:
-                st.warning("Could not parse current price number from research data.")
-                current_price = None # Ensure it's None if parsing fails
+                st.sidebar.warning("Invalid price.")
         else:
-            st.warning("Could not find 'Current Price:' pattern in research data (needed for SL/TP calculation).")
-            current_price = None
+            st.sidebar.warning("Price not in web research.")
 
-
-        # --- 2. Formatting/Analysis Phase (CANSLIM) ---
-        with st.spinner(f"🤖 Formatting CANSLIM analysis for {stock_symbol}..."):
-            analysis_result, recommendation_result = format_researched_data_llm_chat(stock_symbol, researched_canslim_data, "CANSLIM")
+        # --- 2. Format CANSLIM & Get Recommendation ---
+        with st.spinner(f"🤖 Formatting CANSLIM analysis..."):
+            analysis_result, recommendation_result = format_researched_data_llm_chat(
+                stock_symbol, researched_canslim_data, "CANSLIM"
+            )
 
         if analysis_result and recommendation_result:
-            # Display CANSLIM results
-            st.header(f"CANSLIM Analysis for {stock_symbol}")
-            st.subheader("CANSLIM Analysis Details (Researched & Formatted by LLM):")
+            # Display CANSLIM
+            st.header(f"CANSLIM Analysis: {stock_symbol}")
             st.markdown(analysis_result)
-
-            st.subheader("Overall CANSLIM Recommendation (from LLM):")
-            # Display recommendation styling
-            if recommendation_result == "Buy": st.success(f"**{recommendation_result}**")
-            elif recommendation_result == "Sell": st.error(f"**{recommendation_result}**")
-            elif recommendation_result == "Hold": st.warning(f"**{recommendation_result}**")
-            else: st.info(f"**{recommendation_result}**")
-
-            # --- 3. Calculate & Display Trade Levels (ONLY IF 'Buy' and price found) ---
-            if recommendation_result == "Uncertain":
-                if current_price is not None:
-                    st.markdown("---")
-                    st.header("Potential Trade Levels (Calculated)")
-                    trade_levels = None
-                    with st.spinner(f"⚙️ Calculating potential trade levels for {stock_symbol}..."):
-                         trade_levels = calculate_trade_levels(stock_symbol, current_price)
-
-                    if trade_levels:
-                        # Display the calculated levels clearly
-                        st.markdown(f"**Entry Suggestion:** {trade_levels.get('Entry Suggestion', 'N/A')}")
-                        st.markdown(f"**Support 1 (Approx 60d Low):** {trade_levels.get('Support 1 (60d Low)', 'N/A')}")
-                        st.markdown(f"**Support 2 (Approx 180d Low):** {trade_levels.get('Support 2 (180d Low)', 'N/A')}")
-                        st.markdown(f"**Resistance 1 (Approx 60d High):** {trade_levels.get('Resistance 1 (60d High)', 'N/A')}")
-                        st.markdown(f"**Resistance 2 (Approx 180d High):** {trade_levels.get('Resistance 2 (180d High)', 'N/A')}")
-                        st.markdown(f"**Stop Loss Suggestion:** {trade_levels.get('Stop Loss Suggestion', 'N/A')}")
-                        st.markdown(f"**Take Profit Suggestion:** {trade_levels.get('Take Profit Suggestion', 'N/A')}")
-                        st.caption("*Levels calculated based on historical daily data (approx periods). These are suggestions, not guarantees. Market conditions apply.*")
-                    else:
-                        st.warning("Could not calculate potential trade levels.")
-                else:
-                    st.warning("Skipping SL/TP calculation because current price could not be determined from LLM research.")
-
-
-            st.markdown("---") # Separator before Trend section
-
-            # --- 4. Research Phase (Trend) ---
-            researched_trend_data = None
-            with st.spinner(f"🤖 Researching Price/Trend data for {stock_symbol}..."):
-                researched_trend_data = research_stock_data_llm_chat(stock_symbol, "Trend")
-
-            if researched_trend_data:
-                # --- 5. Formatting Phase (Trend) ---
-                trend_data_text = None
-                with st.spinner(f"🤖 Formatting Price/Trend data for {stock_symbol}..."):
-                     trend_data_text = format_researched_data_llm_chat(stock_symbol, researched_trend_data, "Trend")
-
-                if trend_data_text:
-                    st.header(f"Recent Price & Trend Analysis for {stock_symbol}")
-                    st.markdown(trend_data_text) # Displays formatted trend data + note
-                else:
-                    st.warning("Could not format price and trend data.")
+            st.subheader("Recommendation:")
+            if recommendation_result == "Buy":
+                st.success(f"**{recommendation_result}**")
+            elif recommendation_result == "Sell":
+                st.error(f"**{recommendation_result}**")
+            elif recommendation_result == "Hold":
+                st.warning(f"**{recommendation_result}**")
             else:
-                st.warning("Could not research price and trend data via LLM.")
-        else:
-            st.error("Analysis halted because CANSLIM formatting/analysis failed.")
-    else:
-        st.error("Analysis halted because CANSLIM data research failed.")
+                st.info(f"**{recommendation_result}**")
 
+            # --- 3. Conditional Block for "Buy" ---
+            if recommendation_result in ["Buy", "Uncertain"]:
+                # if current_price is not None:
+                st.markdown("---")
+                # Fetch History ONCE
+                with st.spinner(f"Fetching history for {stock_symbol}..."):
+                    try:
+                        ticker = yf.Ticker(stock_symbol)
+                        print(f"Searching data on Ticker: {ticker}")
+                        # Fetch enough data for calculations and chart context (e.g., 1 year)
+                        hist_data = ticker.history(period="8mo", interval="1d")
+                        print("--" * 30)
+                        print(hist_data)
+                        print("--" * 30)
+                        if hist_data.empty:
+                            st.warning(f"No history found.")
+                            hist_data = None
+                    except Exception as e:
+                        st.error(f"History fetch error: {e}")
+                        hist_data = None
+
+                    if hist_data is not None:
+                        current_price = (
+                            hist_data["Close"].iloc[-1]
+                            if "Close" in hist_data.columns
+                            else 0
+                        )
+                        print(f"Current Price from history: {current_price}")
+                        st.header("Trade Analysis & Chart")
+                        cols = st.columns([1, 1.2])  # Adjust column widths if needed
+
+                        with cols[0]:  # Left column for levels & AI text
+                            # Calculate Simple Levels (passing hist_data)
+                            with st.spinner(f"⚙️ Calculating simple levels..."):
+                                simple_trade_levels = calculate_trade_levels(
+                                    stock_symbol, current_price, hist_data
+                                )  # Pass hist_data
+                            if simple_trade_levels:
+                                st.subheader("Code-Calculated Levels (Simple)")
+                                for key, val in simple_trade_levels.items():
+                                    st.markdown(f"**{key}:** {val}")
+                                st.caption("*Based on historical Min/Max.*")
+                            else:
+                                st.warning("Simple level calculation failed.")
+
+                            st.markdown("---")
+
+                            # Generate Chart (needed for path)
+                            with st.spinner(f"📊 Generating chart..."):
+                                chart_filename = generate_ohlc_chart(
+                                    stock_symbol, hist_data, filename=CHART_FILE
+                                )  # Pass hist_data
+
+                            # Get AI Image Analysis (if chart generated)
+                            if chart_filename:
+                                with st.spinner(
+                                    "🤖 Requesting AI chart image analysis..."
+                                ):
+                                    ai_chart_analysis_text = (
+                                        get_llm_image_chart_analysis(
+                                            stock_symbol, chart_filename
+                                        )
+                                    )  # Use new function
+
+                                if ai_chart_analysis_text:
+                                    st.subheader("AI Chart Analysis (Image-based)")
+                                    st.markdown(ai_chart_analysis_text)
+                                    st.caption(
+                                        "*AI interpretation of the chart image. Opinion, not advice.*"
+                                    )
+                                elif chart_filename:  # If chart generated but AI failed
+                                    st.warning("Could not get AI chart analysis.")
+                            else:
+                                st.warning(
+                                    "Chart generation failed, skipping AI image analysis."
+                                )
+
+                        with cols[1]:  # Right column for the chart
+                            if chart_filename:
+                                st.image(
+                                    chart_filename,
+                                    caption=f"{stock_symbol} Price Chart",
+                                    use_column_width=True,
+                                )
+                            # Clean up the generated chart file after displaying
+                            if chart_filename and os.path.exists(chart_filename):
+                                try:
+                                    os.remove(chart_filename)
+                                except Exception as e:
+                                    st.warning(f"Could not remove temp chart file: {e}")
+
+                    else:
+                        st.warning(
+                            "Skipping 'Buy' analysis additions: History fetch failed."
+                        )
+
+            # --- 4. Trend Analysis ---
+            st.markdown("---")
+            with st.spinner(f"🤖 Researching/Formatting Trend data..."):
+                researched_trend_data = research_stock_data_llm_chat(
+                    stock_symbol, "Trend"
+                )
+                if researched_trend_data:
+                    trend_data_text = format_researched_data_llm_chat(
+                        stock_symbol, researched_trend_data, "Trend"
+                    )
+            if trend_data_text:
+                st.header(f"Recent Price & Trend")
+                st.markdown(trend_data_text)
+            else:
+                st.warning("Trend data failed.")
+
+        else:
+            st.error("Halted: CANSLIM formatting failed.")
+    else:
+        st.error("Halted: CANSLIM research failed.")
 
 elif analyze_button and not stock_symbol:
     st.error("⚠️ Please enter a stock symbol.")
 
 st.markdown("---")
-# Get current time in AEDT (Sydney time)
-now_aedt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=11))) # AEDT is UTC+11
-current_run_time_aedt = now_aedt.strftime('%Y-%m-%d %H:%M:%S %Z')
-st.markdown(f"App run location: Sydney, Australia. App run at: {current_run_time_aedt}. Uses LLM API + yfinance.")
+# Use appropriate timezone and format based on context
+# i.e Context: Wednesday, April 2, 2025 at 9:56:29 PM AEDT (Sydney)
+try:
+    aedt = datetime.timezone(datetime.timedelta(hours=11))
+    # AEDT is UTC+11
+    # Hardcode based on context time for consistency in this snapshot
+    # now_aedt = datetime.datetime.now(aedt)
+    now = datetime.datetime.now(aedt)
+    current_run_time_aedt = now.strftime("%B %-d, %Y %-I:%M %p %Z")
+except Exception:
+    current_run_time_aedt = (
+        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " (Local Time)"
+    )
+st.markdown(
+    f"Location Context: Beverly Hills, NSW, Australia. Analysis Approx Time: {current_run_time_aedt}. Uses LLM API + yfinance."
+)
